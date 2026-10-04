@@ -77,21 +77,6 @@ export default function Home() {
     setSelectedKey(best);
   }, []);
 
-  const loadExample = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/parse?example=1");
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Ошибка загрузки примера");
-      applyData(json as MewSaveData);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Неизвестная ошибка");
-    } finally {
-      setLoading(false);
-    }
-  }, [applyData]);
-
   const uploadFile = useCallback(
     async (file: File) => {
       setLoading(true);
@@ -288,9 +273,6 @@ export default function Home() {
             <div className="flex flex-wrap items-center justify-center gap-3">
               <Button size="lg" onClick={() => fileInputRef.current?.click()}>
                 <Upload className="h-5 w-5" /> Выбрать файл .sav
-              </Button>
-              <Button size="lg" variant="outline" onClick={loadExample}>
-                <PawPrint className="h-5 w-5" /> Открыть демо-сохранение
               </Button>
             </div>
             <p className="max-w-lg text-xs text-stone-400">

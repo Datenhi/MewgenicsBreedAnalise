@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseMewSave, type MewSaveData } from "@/lib/mewgenics-parser";
-import fs from "node:fs";
-import path from "node:path";
+import { parseMewSave } from "@/lib/mewgenics-parser";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,21 +8,6 @@ const MAX_SIZE = 20 * 1024 * 1024; // 20 MB
 
 function fail(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
-}
-
-export async function GET(req: NextRequest) {
-  const example = req.nextUrl.searchParams.get("example");
-  if (!example) return fail("Укажите ?example=1 для загрузки демо-файла");
-  try {
-    const p = path.join(process.cwd(), "public", "demo", "steamcampaign01.sav");
-    if (!fs.existsSync(p)) return fail("Демо-файл не найден на сервере", 404);
-    const buf = fs.readFileSync(p);
-    const data: MewSaveData = parseMewSave(buf, "steamcampaign01.sav (пример)");
-    return NextResponse.json(data);
-  } catch (e) {
-    console.error("example parse error:", e);
-    return fail("Не удалось разобрать демо-файл", 500);
-  }
 }
 
 export async function POST(req: NextRequest) {
