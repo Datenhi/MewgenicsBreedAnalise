@@ -14,7 +14,7 @@ import {
   InbreedingBadge,
   type TreeContext,
 } from "@/components/family-tree";
-import type { MewSaveData, MewCat } from "@/lib/mewgenics-parser";
+import { parseMewSave, type MewSaveData, type MewCat } from "@/lib/mewgenics-parser";
 import {
   Cat as CatIcon,
   Upload,
@@ -81,12 +81,10 @@ export default function Home() {
       setLoading(true);
       setError(null);
       try {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await fetch("/api/parse", { method: "POST", body: form });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || "Ошибка разбора файла");
-        applyData(json as MewSaveData);
+        // Разбор происходит полностью в браузере — файл никуда не отправляется
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const data = await parseMewSave(bytes, file.name);
+        applyData(data);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Неизвестная ошибка");
       } finally {
@@ -266,7 +264,8 @@ export default function Home() {
               </h2>
               <p className="mx-auto max-w-md text-sm text-stone-500">
                 Поддерживаются файлы <code className="rounded bg-stone-100 px-1">steamcampaign*.sav</code> из
-                папки сохранений Mewgenics. Файл анализируется на сервере и не сохраняется.
+                папки сохранений Mewgenics. Файл разбирается прямо в вашем браузере —
+                он никуда не отправляется и не сохраняется.
               </p>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-3">
@@ -275,8 +274,9 @@ export default function Home() {
               </Button>
             </div>
             <p className="max-w-lg text-xs text-stone-400">
-              Парсер читает таблицу <b>cats</b> и родословную <b>pedigree</b> внутри базы SQLite:
-              имена, пол, класс, родителей и коэффициент инбридинга каждого кота.
+              Парсер читает таблицу <b>cats</b> и родословную <b>pedigree</b> внутри базы SQLite
+              локально, средствами WebAssembly (sql.js): имена, пол, класс, родителей и
+              коэффициент инбридинга каждого кота.
             </p>
           </div>
         )}
@@ -503,7 +503,8 @@ export default function Home() {
 
       <footer className="mt-auto border-t border-amber-200/70 bg-white/70 py-3">
         <div className="mx-auto w-full max-w-7xl px-4 text-center text-xs text-stone-400 sm:px-6">
-          Неофициальный инструмент для сообщества Mewgenics · формат сохранения восстановлен
+          Неофициальный инструмент для сообщества Mewgenics · анализ выполняется локально в
+          браузере, файлы не покидают ваш компьютер · формат сохранения восстановлен
           эвристически; если что-то отображается странно — напишите автору
         </div>
       </footer>

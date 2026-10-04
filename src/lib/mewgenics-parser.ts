@@ -1,5 +1,5 @@
 /**
- * Mewgenics .sav parser
+ * Mewgenics .sav parser — полностью клиентский (sql.js / WebAssembly)
  *
  * Reverse-engineered format:
  *  - .sav is an SQLite 3 database
@@ -16,6 +16,9 @@
  *  [17]uint8 nameLen  [21]flagByte  [22..]name in UTF-16LE
  *  (name may end with a single-byte last char — "2n-1" scheme)
  *  ASCII 'male'/'female' marks gender somewhere later in the blob.
+ *
+ * SQL-движок (sql.js) загружается динамически через <script> из /public,
+ * поэтому файл сохранения разбирается прямо в браузере и никуда не отправляется.
  */
 
 export interface MewCat {
@@ -34,10 +37,69 @@ export interface MewSaveData {
   warnings: string[];
 }
 
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { Database, SqlJsStatic } from "sql.js";
+
+/* ------------------------------------------------------------------ */
+/* Загрузка sql.js (WASM) в браузере                                   */
+/* ------------------------------------------------------------------ */
+
+const SQL_JS_BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
+declare global {
+  interface Window {
+    initSqlJs?: (config: {
+      locateFile: (file: string) => string;
+    }) => Promise<SqlJsStatic>;
+  }
+}
+
+function loadScriptOnce(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      `script[data-sqljs="${src}"]`
+    );
+    if (existing) {
+      if (existing.dataset.loaded === "1") return resolve();
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () =>
+        reject(new Error("Не удалось загрузить SQL-движок (sql.js)"))
+      );
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.dataset.sqljs = src;
+    s.addEventListener("load", () => {
+      s.dataset.loaded = "1";
+      resolve();
+    });
+    s.addEventListener("error", () =>
+      reject(new Error("Не удалось загрузить SQL-движок (sql.js)"))
+    );
+    document.head.appendChild(s);
+  });
+}
+
+let sqlPromise: Promise<SqlJsStatic> | null = null;
+
+async function getSQL(): Promise<SqlJsStatic> {
+  if (typeof window === "undefined") {
+    throw new Error("Разбор файла доступен только в браузере");
+  }
+  if (!sqlPromise) {
+    sqlPromise = loadScriptOnce(`${SQL_JS_BASE}/sql-wasm.js`).then(() => {
+      const init = window.initSqlJs;
+      if (!init) throw new Error("SQL-движок не инициализировался");
+      return init({ locateFile: (file) => `${SQL_JS_BASE}/${file}` });
+    });
+  }
+  return sqlPromise;
+}
+
+/* ------------------------------------------------------------------ */
+/* Разбор бинарных блобов (чистые функции, без Node API)               */
+/* ------------------------------------------------------------------ */
 
 const KNOWN_CLASSES = [
   "Necromancer",
@@ -207,38 +269,72 @@ function parsePedigreeBlob(data: Uint8Array): {
   return { records: best ? best.records : new Map(), declaredCount };
 }
 
-export function parseMewSave(
-  dbBuffer: Buffer,
+/* ------------------------------------------------------------------ */
+/* Главная функция: разбираем .sav (SQLite) целиком в браузере          */
+/* ------------------------------------------------------------------ */
+
+export async function parseMewSave(
+  dbBytes: Uint8Array,
   sourceName: string
-): MewSaveData {
+): Promise<MewSaveData> {
   const warnings: string[] = [];
 
-  const tmp = path.join(os.tmpdir(), `mewgenics-${Date.now()}-${Math.random().toString(36).slice(2)}.sav`);
-  fs.writeFileSync(tmp, dbBuffer);
+  // quick sanity check: SQLite header
+  const header = new TextDecoder("latin1").decode(dbBytes.subarray(0, 16));
+  if (!header.startsWith("SQLite format 3")) {
+    throw new Error(
+      "Это не похоже на сохранение Mewgenics: файл должен быть базой данных SQLite (.sav)."
+    );
+  }
 
-  let catsRows: Array<{ key: number; data: Buffer }> = [];
-  let pedigree: Buffer | null = null;
+  const SQL = await getSQL();
+  let db: Database;
+  try {
+    db = new SQL.Database(dbBytes);
+  } catch {
+    throw new Error(
+      "Не удалось открыть файл как базу данных SQLite. Файл повреждён или это не .sav сохранение."
+    );
+  }
+
+  let catsRows: Array<{ key: number; data: Uint8Array }> = [];
+  let pedigree: Uint8Array | null = null;
 
   try {
-    const db = new DatabaseSync(tmp, { readOnly: true });
+    let stmt: ReturnType<Database["prepare"]> | null = null;
     try {
-      const catStmt = db.prepare("SELECT key, data FROM cats ORDER BY key");
-      catsRows = catStmt.all().map((r: { key: number | bigint; data: Buffer }) => ({
-        key: Number(r.key),
-        data: r.data,
-      }));
-      const pedStmt = db.prepare("SELECT data FROM files WHERE key = 'pedigree'");
-      const pedRow = pedStmt.get() as { data: Buffer } | undefined;
-      pedigree = pedRow ? pedRow.data : null;
+      stmt = db.prepare("SELECT key, data FROM cats ORDER BY key");
+      while (stmt.step()) {
+        const row = stmt.get();
+        const key = Number(row[0]);
+        const data = row[1];
+        if (Number.isFinite(key) && data instanceof Uint8Array) {
+          catsRows.push({ key, data });
+        }
+      }
+    } catch {
+      throw new Error(
+        "В файле нет таблицы cats — это не сохранение Mewgenics. Нужен файл steamcampaign*.sav из папки сохранений игры."
+      );
     } finally {
-      db.close();
+      stmt?.free();
+    }
+
+    try {
+      const pedStmt = db.prepare("SELECT data FROM files WHERE key = 'pedigree'");
+      try {
+        if (pedStmt.step()) {
+          const d = pedStmt.get()[0];
+          if (d instanceof Uint8Array) pedigree = d;
+        }
+      } finally {
+        pedStmt.free();
+      }
+    } catch {
+      pedigree = null;
     }
   } finally {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      /* ignore */
-    }
+    db.close();
   }
 
   // parse blobs
@@ -249,11 +345,10 @@ export function parseMewSave(
   }
   const blobs = new Map<number, BlobInfo>();
   for (const row of catsRows) {
-    const u8 = new Uint8Array(row.data);
     blobs.set(row.key, {
-      name: extractCatName(u8),
-      gender: extractGender(u8),
-      className: extractClass(u8),
+      name: extractCatName(row.data),
+      gender: extractGender(row.data),
+      className: extractClass(row.data),
     });
   }
 
@@ -261,7 +356,7 @@ export function parseMewSave(
   let pedRecords = new Map<number, { p1: number | null; p2: number | null; inb: number }>();
   let declared = 0;
   if (pedigree) {
-    const parsed = parsePedigreeBlob(new Uint8Array(pedigree));
+    const parsed = parsePedigreeBlob(pedigree);
     pedRecords = parsed.records;
     declared = parsed.declaredCount;
   } else {
@@ -294,7 +389,9 @@ export function parseMewSave(
   }
 
   if (cats.length === 0) {
-    warnings.push("Не найдено ни одного кота. Это точно сохранение Mewgenics?");
+    throw new Error(
+      "В файле не найдено котов. Убедитесь, что это сохранение Mewgenics (steamcampaign*.sav)."
+    );
   }
 
   return { sourceName, cats, warnings };
