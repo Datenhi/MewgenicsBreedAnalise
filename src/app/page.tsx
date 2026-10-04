@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
@@ -349,7 +348,7 @@ export default function Home() {
                       </Button>
                     ))}
                   </div>
-                  <ScrollArea className="h-[calc(100vh-330px)] min-h-64 max-h-[70vh] pr-2">
+                  <div className="scroll-slim h-[calc(100vh-330px)] max-h-[70vh] min-h-64 overflow-y-auto overscroll-contain pr-2">
                     <ul className="space-y-1">
                       {filteredCats.map((c) => (
                         <li key={c.key}>
@@ -387,7 +386,7 @@ export default function Home() {
                         </li>
                       )}
                     </ul>
-                  </ScrollArea>
+                  </div>
                 </CardContent>
               </Card>
 
@@ -478,14 +477,14 @@ export default function Home() {
                             </TabsList>
                           </div>
                           <TabsContent value="descendants" className="mt-0">
-                            <ScrollArea className="max-h-[65vh] min-h-48 pr-3">
+                            <div className="scroll-slim max-h-[65vh] min-h-48 overflow-y-auto overscroll-contain pr-3">
                               <DescendantsTree rootKey={selected.key} ctx={ctx} />
-                            </ScrollArea>
+                            </div>
                           </TabsContent>
                           <TabsContent value="ancestors" className="mt-0">
-                            <ScrollArea className="max-h-[65vh] min-h-48 pr-3">
+                            <div className="scroll-slim max-h-[65vh] min-h-48 overflow-y-auto overscroll-contain pr-3">
                               <AncestorsTree rootKey={selected.key} ctx={ctx} />
-                            </ScrollArea>
+                            </div>
                           </TabsContent>
                         </Tabs>
                       </CardContent>
