@@ -14,7 +14,7 @@ import {
   InbreedingBadge,
   type TreeContext,
 } from "@/components/family-tree";
-import { parseMewSave, type MewSaveData, type MewCat } from "@/lib/mewgenics-parser";
+import { parseMewSave, type MewSaveData, type MewCat, type MewStatus } from "@/lib/mewgenics-parser";
 import {
   Cat as CatIcon,
   Upload,
@@ -23,6 +23,8 @@ import {
   Search,
   AlertTriangle,
   Users,
+  Heart,
+  Skull,
   PawPrint,
   Dna,
   Home as HomeIcon,
@@ -30,7 +32,7 @@ import {
 } from "lucide-react";
 
 type ViewMode = "descendants" | "ancestors";
-type Filter = "all" | "present" | "gone";
+type Filter = "alive" | "house" | "dead" | "all";
 
 export default function Home() {
   const [data, setData] = useState<MewSaveData | null>(null);
@@ -39,7 +41,7 @@ export default function Home() {
   const [selectedKey, setSelectedKey] = useState<number | null>(null);
   const [view, setView] = useState<ViewMode>("descendants");
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>("alive");
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -66,7 +68,9 @@ export default function Home() {
     };
     let best: number | null = null;
     let bestCount = -1;
-    for (const c of d.cats) {
+    const alivePool = d.cats.filter((c) => c.hasBlob && !c.dead)
+    const pool = alivePool.length > 0 ? alivePool : d.cats;
+    for (const c of pool) {
       const n = countDesc(c.key, new Set());
       if (n > bestCount) {
         bestCount = n;
@@ -81,7 +85,6 @@ export default function Home() {
       setLoading(true);
       setError(null);
       try {
-        // Разбор происходит полностью в браузере — файл никуда не отправляется
         const bytes = new Uint8Array(await file.arrayBuffer());
         const data = await parseMewSave(bytes, file.name);
         applyData(data);
@@ -165,19 +168,22 @@ export default function Home() {
 
   const stats = useMemo(() => {
     if (!data) return null;
-    const present = data.cats.filter((c) => c.hasBlob).length;
+    const present = data.cats.filter((c) => c.inHouse && !c.dead).length;
     const founders = data.cats.filter((c) => c.parents[0] == null && c.parents[1] == null).length;
     const inbred = data.cats.filter((c) => c.inbreeding > 0).length;
     const withKids = data.cats.filter((c) => (childrenMap.get(c.key) ?? []).length > 0).length;
-    return { total: data.cats.length, present, founders, inbred, withKids };
+    const alive = data.cats.filter((c) => c.hasBlob && !c.dead).length;
+    const dead = data.cats.filter((c) => c.dead).length;
+    return { total: data.cats.length, present, founders, inbred, withKids, alive, dead };
   }, [data, childrenMap]);
 
   const filteredCats = useMemo(() => {
     if (!data) return [];
     const q = search.trim().toLowerCase();
     return data.cats.filter((c) => {
-      if (filter === "present" && !c.hasBlob) return false;
-      if (filter === "gone" && c.hasBlob) return false;
+      if (filter === "alive" && (c.dead || !c.hasBlob)) return false;
+      if (filter === "house" && (!c.inHouse || c.dead)) return false;
+      if (filter === "dead" && !c.dead) return false;
       if (!q) return true;
       return (
         c.name.toLowerCase().includes(q) || String(c.key) === q.replace("#", "")
@@ -308,9 +314,9 @@ export default function Home() {
 
             <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <StatCard icon={<Users className="h-5 w-5" />} label="Котов в родословной" value={stats.total} tone="amber" />
-              <StatCard icon={<HomeIcon className="h-5 w-5" />} label="Сейчас в доме" value={stats.present} tone="emerald" />
-              <StatCard icon={<PawPrint className="h-5 w-5" />} label="Котов-основателей" value={stats.founders} tone="stone" />
-              <StatCard icon={<Dna className="h-5 w-5" />} label="С инбридингом" value={stats.inbred} tone="rose" />
+              <StatCard icon={<Heart className="h-5 w-5" />} label="Живых сейчас" value={stats.alive} tone="emerald" />
+              <StatCard icon={<HomeIcon className="h-5 w-5" />} label="Из них в доме" value={stats.present} tone="sky" />
+              <StatCard icon={<Skull className="h-5 w-5" />} label="Мёртвых (кладбище)" value={stats.dead} tone="rose" />
             </div>
 
             <div className="grid flex-1 gap-4 lg:grid-cols-[340px_1fr]">
@@ -330,9 +336,10 @@ export default function Home() {
                   <div className="mb-2 flex gap-1.5">
                     {(
                       [
+                        ["alive", "Живые"],
+                        ["house", "В доме"],
+                        ["dead", "Мёртвые"],
                         ["all", "Все"],
-                        ["present", "В доме"],
-                        ["gone", "Не в доме"],
                       ] as Array<[Filter, string]>
                     ).map(([f, label]) => (
                       <Button
@@ -371,12 +378,7 @@ export default function Home() {
                                 title={`Инбридинг ${Math.round(c.inbreeding * 100)}%`}
                               />
                             )}
-                            {!c.hasBlob && (
-                              <span
-                                className="h-2 w-2 shrink-0 rounded-full bg-stone-300"
-                                title="Кота нет в доме"
-                              />
-                            )}
+                            <StatusDot cat={c} />
                           </button>
                         </li>
                       ))}
@@ -406,11 +408,7 @@ export default function Home() {
                               {selected.className}
                             </Badge>
                           )}
-                          {!selected.hasBlob && (
-                            <Badge variant="outline" className="bg-stone-100 text-stone-500 border-stone-200">
-                              нет в доме
-                            </Badge>
-                          )}
+                          <StatusBadge status={selected.status} room={selected.room} retired={selected.retired} donated={selected.donated} />
                           <InbreedingBadge value={selected.inbreeding} />
                         </div>
 
@@ -552,6 +550,78 @@ function LineageIcon() {
   );
 }
 
+function StatusDot({ cat }: { cat: MewCat }) {
+  const cls =
+      cat.status === "dead"
+          ? "bg-stone-700"
+          : cat.status === "house"
+              ? "bg-emerald-500"
+              : cat.status === "adventure"
+                  ? "bg-sky-500"
+                  : cat.status === "gone"
+                      ? "bg-stone-300"
+                      : "bg-white border border-stone-300"; // unknown
+  const title =
+      cat.status === "dead"
+          ? "Мёртв"
+          : cat.status === "house"
+              ? `В доме${cat.room ? ` · ${cat.room}` : ""}`
+              : cat.status === "adventure"
+                  ? "В походе"
+                  : cat.status === "gone"
+                      ? "Жив, но не в доме (продан/отдан/на пенсии)"
+                      : "Нет данных (только в родословной)";
+  return <span className={`h-2 w-2 shrink-0 rounded-full ${cls}`} title={title} />;
+}
+
+function StatusBadge({
+                       status,
+                       room,
+                       retired,
+                       donated,
+                     }: {
+  status: MewStatus;
+  room: string | null;
+  retired: boolean;
+  donated: boolean;
+}) {
+  if (status === "dead")
+    return (
+        <Badge className="gap-1 bg-stone-800 text-stone-100 hover:bg-stone-800">
+          <Skull className="h-3 w-3" /> мёртв
+        </Badge>
+    );
+  if (status === "house")
+    return (
+        <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100" title="Кот сейчас живёт в доме">
+          в доме{room ? ` · ${room}` : ""}
+        </Badge>
+    );
+  if (status === "adventure")
+    return (
+        <Badge className="bg-sky-100 text-sky-800 hover:bg-sky-100" title="Кот сейчас в походе">
+          в походе
+        </Badge>
+    );
+  if (status === "gone") {
+    const why = retired ? "на пенсии" : donated ? "пожертвован" : "продан/отдан";
+    return (
+        <Badge
+            variant="outline"
+            className="bg-stone-50 text-stone-500 border-stone-200"
+            title="Кот жив, но не в доме"
+        >
+          не в доме · {why}
+        </Badge>
+    );
+  }
+  return (
+      <Badge variant="outline" className="border-dashed bg-stone-50 text-stone-400 border-stone-300">
+        нет данных
+      </Badge>
+  );
+}
+
 function StatCard({
   icon,
   label,
@@ -561,11 +631,12 @@ function StatCard({
   icon: React.ReactNode;
   label: string;
   value: number;
-  tone: "amber" | "emerald" | "stone" | "rose";
+  tone: "amber" | "emerald" | "stone" | "rose" | "sky";
 }) {
   const tones: Record<string, string> = {
     amber: "bg-amber-100 text-amber-700",
     emerald: "bg-emerald-100 text-emerald-700",
+    sky: "bg-sky-100 text-sky-700",
     stone: "bg-stone-200 text-stone-600",
     rose: "bg-rose-100 text-rose-700",
   };

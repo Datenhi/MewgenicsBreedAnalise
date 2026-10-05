@@ -8,6 +8,7 @@ import {
   ChevronRight,
   GitBranch,
   MousePointerClick,
+  Skull,
 } from "lucide-react";
 import type { MewCat } from "@/lib/mewgenics-parser";
 
@@ -39,6 +40,16 @@ export function GenderBadge({ gender }: { gender: MewCat["gender"] }) {
         Ж
       </Badge>
     );
+  if (gender === "D")
+    return (
+        <Badge
+            variant="outline"
+            className="bg-violet-50 text-violet-700 border-violet-200 shrink-0"
+            title="Дитто (может быть и самцом, и самкой)"
+        >
+          Д
+        </Badge>
+    );
   return (
     <Badge variant="outline" className="text-muted-foreground shrink-0" title="Пол неизвестен">
       ?
@@ -65,15 +76,52 @@ export function InbreedingBadge({ value }: { value: number }) {
   );
 }
 
+function DeadBadge() {
+  return (
+      <Badge
+          variant="outline"
+          className="gap-1 border-stone-300 bg-stone-200 text-stone-700 shrink-0"
+          title="Кот мёртв (флаг 0x0020 в сохранении) — числится на кладбище"
+      >
+        <Skull className="h-3 w-3" />
+        мёртв
+      </Badge>
+  );
+}
+
 function GoneBadge() {
   return (
-    <Badge
-      variant="outline"
-      className="bg-stone-100 text-stone-500 border-stone-200 shrink-0"
-      title="Кот отсутствует в таблице cats (продан, умер или убежал), но упомянут в родословной"
-    >
-      не в доме
-    </Badge>
+      <Badge
+          variant="outline"
+          className="bg-stone-100 text-stone-500 border-stone-200 shrink-0"
+          title="Кот жив, но его нет в доме (продан, отдан, на пенсии) — статус из сохранения"
+      >
+        не в доме
+      </Badge>
+  );
+}
+
+function AdventureBadge() {
+  return (
+      <Badge
+          variant="outline"
+          className="bg-sky-50 text-sky-700 border-sky-200 shrink-0"
+          title="Кот сейчас в походе (files.adventure_state)"
+      >
+        в походе
+      </Badge>
+  );
+}
+
+function UnknownBadge() {
+  return (
+      <Badge
+          variant="outline"
+          className="bg-stone-100 text-stone-400 border-dashed border-stone-300 shrink-0"
+          title="Кота нет в таблице cats — он известен только по родословной, статус определить нельзя"
+      >
+        нет данных
+      </Badge>
   );
 }
 
@@ -125,7 +173,9 @@ function CatRow({
         }
       }}
       className={`group flex w-full cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors hover:border-amber-300 hover:bg-amber-50/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
-        depthColor ?? "bg-white border-stone-200"
+          cat.dead
+              ? "border-stone-200 bg-stone-100/80 opacity-70 grayscale-[30%]"
+              : depthColor ?? "bg-white border-stone-200"
       }`}
     >
       <span className="font-medium text-stone-800 group-hover:text-amber-900 truncate">
@@ -133,7 +183,15 @@ function CatRow({
       </span>
       <span className="text-[11px] text-stone-400 shrink-0">#{cat.key}</span>
       <GenderBadge gender={cat.gender} />
-      {!cat.hasBlob && <GoneBadge />}
+      {cat.status === "dead" ? (
+          <DeadBadge />
+      ) : cat.status === "adventure" ? (
+          <AdventureBadge />
+      ) : cat.status === "gone" ? (
+          <GoneBadge />
+      ) : cat.status === "unknown" ? (
+          <UnknownBadge />
+      ) : null}
       <span className="ml-auto flex items-center gap-1.5 shrink-0">
         {otherParent != null && (
           <span className="text-[11px] text-stone-400 whitespace-nowrap">

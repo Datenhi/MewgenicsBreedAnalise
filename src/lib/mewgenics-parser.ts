@@ -1,34 +1,20 @@
-/**
- * Mewgenics .sav parser — полностью клиентский (sql.js / WebAssembly)
- *
- * Reverse-engineered format:
- *  - .sav is an SQLite 3 database
- *  - table `cats`:  key INTEGER (cat id 1..N), data BLOB (per-cat binary record)
- *  - table `files`: key TEXT, data BLOB; row 'pedigree' holds the family graph
- *
- * Pedigree blob layout (little-endian, int64 slots):
- *  [-11 marker][recordCount][?][bitstream ...] then records:
- *  (child:int64, parent1:int64|-1, parent2:int64|-1, inbreeding:double)
- *  Interleaved meta-pairs (huge values) are skipped by re-sync scanning.
- *
- * Cat blob layout (relevant fields):
- *  [0]int32 seed-ish  [4]int32 version (5090)  [8]0x00 [9..17)random seed
- *  [17]uint8 nameLen  [21]flagByte  [22..]name in UTF-16LE
- *  (name may end with a single-byte last char — "2n-1" scheme)
- *  ASCII 'male'/'female' marks gender somewhere later in the blob.
- *
- * SQL-движок (sql.js) загружается динамически через <script> из /public,
- * поэтому файл сохранения разбирается прямо в браузере и никуда не отправляется.
- */
+export type MewStatus = "house" | "adventure" | "dead" | "gone" | "unknown";
 
 export interface MewCat {
   key: number;
   name: string;
-  gender: "M" | "F" | "?";
+  gender: "M" | "F" | "D" | "?";
   inbreeding: number;
   hasBlob: boolean;
   className: string | null;
   parents: [number | null, number | null];
+  alive: boolean;
+  dead: boolean;
+  retired: boolean;
+  donated: boolean;
+  inHouse: boolean;
+  room: string | null;
+  status: MewStatus;
 }
 
 export interface MewSaveData {
@@ -97,8 +83,202 @@ async function getSQL(): Promise<SqlJsStatic> {
   return sqlPromise;
 }
 
+function lz4DecompressBlock(src: Uint8Array, uncompSize: number): Uint8Array {
+  const dst = new Uint8Array(uncompSize);
+  let si = 0;
+  let di = 0;
+  const n = src.length;
+  while (si < n && di < uncompSize) {
+    const token = src[si++];
+    let litLen = token >> 4;
+    if (litLen === 15) {
+      for (;;) {
+        if (si >= n) throw new Error("LZ4: неожиданный конец (litLen)");
+        const b = src[si++];
+        litLen += b;
+        if (b !== 255) break;
+      }
+    }
+    if (si + litLen > n || di + litLen > uncompSize)
+      throw new Error("LZ4: литералы вне диапазона");
+    for (let i = 0; i < litLen; i++) dst[di++] = src[si++];
+    if (di >= uncompSize || si >= n) break; // последняя последовательность
+    if (si + 2 > n) throw new Error("LZ4: обрезанное смещение");
+    const offset = src[si] | (src[si + 1] << 8);
+    si += 2;
+    if (offset === 0 || offset > di) throw new Error("LZ4: неверное смещение");
+    let matchLen = (token & 0x0f) + 4;
+    if ((token & 0x0f) === 15) {
+      for (;;) {
+        if (si >= n) throw new Error("LZ4: неожиданный конец (matchLen)");
+        const b = src[si++];
+        matchLen += b;
+        if (b !== 255) break;
+      }
+    }
+    if (di + matchLen > uncompSize) throw new Error("LZ4: match вне диапазона");
+    let pos = di - offset;
+    for (let i = 0; i < matchLen; i++) dst[di++] = dst[pos++];
+  }
+  if (di !== uncompSize) throw new Error("LZ4: размер не сошёлся");
+  return dst;
+}
+
+function readU32(d: Uint8Array, off: number): number {
+  return d[off] | (d[off + 1] << 8) | (d[off + 2] << 16) | ((d[off + 3] << 24) >>> 0);
+}
+
+function readU16(d: Uint8Array, off: number): number {
+  return d[off] | (d[off + 1] << 8);
+}
+
+function decompressCatBlob(
+    wrapped: Uint8Array
+): { data: Uint8Array; variant: "A" | "B" } {
+  if (wrapped.length < 4) throw new Error("Блоб слишком мал");
+  const uncompLen = readU32(wrapped, 0);
+  if (uncompLen === 0 || uncompLen > 50_000_000)
+    throw new Error("Некорректная длина распакованного блоба");
+  if (wrapped.length >= 8) {
+    const compLen = readU32(wrapped, 4);
+    if (compLen > 0 && compLen <= wrapped.length - 8) {
+      try {
+        const data = lz4DecompressBlock(
+            wrapped.subarray(8, 8 + compLen),
+            uncompLen
+        );
+        return { data, variant: "B" };
+      } catch {
+        /* не вариант B — пробуем A */
+      }
+    }
+  }
+  const data = lz4DecompressBlock(wrapped.subarray(4), uncompLen);
+  return { data, variant: "A" };
+}
+
+const SEX_MAP: Record<number, "M" | "F" | "D"> = { 0: "M", 1: "F", 2: "D" };
+
+interface CatMeta {
+  name: string;
+  gender: "M" | "F" | "D" | "?";
+  dead: boolean;
+  retired: boolean;
+  donated: boolean;
+  flagsKnown: boolean;
+}
+
+function parseCatMeta(dec: Uint8Array): CatMeta {
+  let best: {
+    score: number;
+    nameEndRaw: number;
+    name: string;
+    gender: "M" | "F" | "D" | "?";
+    flags: number | null;
+  } | null = null;
+
+  for (const offLen of [0x0c, 0x10]) {
+    if (offLen + 4 > dec.length) continue;
+    const nl = readU32(dec, offLen);
+    if (nl > 128) continue;
+    const start = 0x14;
+    const end = start + nl * 2;
+    if (end > dec.length) continue;
+
+    const rawName = dec.slice(start, end);
+    const name = new TextDecoder("utf-16le")
+        .decode(rawName)
+        .replace(/\u0000+$/, "");
+
+    let gender: "M" | "F" | "D" | "?" = "?";
+    let score = 0;
+    const offA = end + 8;
+    const offB = end + 12;
+    if (offB + 2 <= dec.length) {
+      const a = readU16(dec, offA);
+      const b = readU16(dec, offB);
+      if (a === b && a in SEX_MAP) {
+        gender = SEX_MAP[a];
+        score += 4;
+      } else if (a in SEX_MAP || b in SEX_MAP) {
+        gender = SEX_MAP[a] ?? SEX_MAP[b] ?? "?";
+        score += 2;
+      }
+    }
+    if (name) score += 1;
+
+    const flagsOff = end + 0x10;
+    const flags =
+        flagsOff + 2 <= dec.length ? readU16(dec, flagsOff) : null;
+
+    if (best === null || score > best.score) {
+      best = { score, nameEndRaw: end, name, gender, flags };
+    }
+  }
+
+  if (!best) {
+    return { name: "", gender: "?", dead: false, retired: false, donated: false, flagsKnown: false };
+  }
+  const flags = best.flags;
+  return {
+    name: best.name,
+    gender: best.gender,
+    dead: flags != null ? !!(flags & 0x0020) : false,
+    retired: flags != null ? !!(flags & 0x0002) : false,
+    donated: flags != null ? !!(flags & 0x4000) : false,
+    flagsKnown: flags != null,
+  };
+}
+
+function parseHouseState(blob: Uint8Array): Map<number, string> {
+  const out = new Map<number, string>();
+  if (blob.length < 8) return out;
+  const ver = readU32(blob, 0);
+  const cnt = readU32(blob, 4);
+  if (ver !== 0 || cnt > 512) return out;
+  let off = 8;
+  for (let i = 0; i < cnt; i++) {
+    if (off + 16 > blob.length) return new Map();
+    const key = readU32(blob, off);
+    const lo = readU32(blob, off + 8);
+    const hi = readU32(blob, off + 12);
+    if (hi !== 0 || lo > 64) return new Map(); // u64 длины комнаты, но комнаты короткие
+    const roomLen = lo;
+    const nameOff = off + 16;
+    if (nameOff + roomLen > blob.length) return new Map();
+    let room = "";
+    for (let i2 = 0; i2 < roomLen; i2++) room += String.fromCharCode(blob[nameOff + i2]);
+    const dOff = nameOff + roomLen;
+    if (dOff + 24 > blob.length) return new Map();
+    out.set(key, room);
+    off = dOff + 24;
+  }
+  // блоб должен быть исчерпан точно — иначе формат не совпал
+  if (off !== blob.length) return new Map();
+  return out;
+}
+
+/** files.adventure_state (если есть): ключи котов, ушедших в поход. */
+function parseAdventureStateKeys(blob: Uint8Array): number[] {
+  if (blob.length < 8) return [];
+  const cnt = readU32(blob, 4);
+  if (cnt > 8) return [];
+  let off = 8;
+  const keys: number[] = [];
+  for (let i = 0; i < cnt; i++) {
+    if (off + 8 > blob.length) return [];
+    const lo = readU32(blob, off);
+    const hi = readU32(blob, off + 4);
+    const key = hi !== 0 ? hi : lo;
+    if (key <= 0 || key > 1_000_000) return [];
+    keys.push(key);
+    off += 8;
+  }
+  return keys;
+}
+
 /* ------------------------------------------------------------------ */
-/* Разбор бинарных блобов (чистые функции, без Node API)               */
+/* Разбор бинарных блобов                                             */
 /* ------------------------------------------------------------------ */
 
 const KNOWN_CLASSES = [
@@ -144,7 +324,6 @@ export function extractCatName(d: Uint8Array): string {
       chars.push(String.fromCharCode(lo));
       o += 2;
     } else if (isPrintableByte(lo)) {
-      // "2n-1" scheme: last char stored without its zero high byte
       chars.push(String.fromCharCode(lo));
       break;
     } else {
@@ -155,7 +334,7 @@ export function extractCatName(d: Uint8Array): string {
   return chars.join("").trim();
 }
 
-function extractGender(d: Uint8Array): "M" | "F" | "?" {
+function extractGenderFallback(d: Uint8Array): "M" | "F" | "?" {
   // search raw bytes for 'female' first, then 'male'
   const pat = (s: string): number[] => Array.from(s, (c) => c.charCodeAt(0));
   const contains = (patv: number[]): number => {
@@ -204,7 +383,6 @@ function tryParsePedigree(vals: bigint[], start: number, count: number): Pedigre
   };
 
   while (i + 3 < vals.length && records.size < count) {
-    // stop at the next section marker (-11 followed by plausible count)
     if (
       vals[i] === MARKER &&
       i + 1 < vals.length &&
@@ -270,7 +448,7 @@ function parsePedigreeBlob(data: Uint8Array): {
 }
 
 /* ------------------------------------------------------------------ */
-/* Главная функция: разбираем .sav (SQLite) целиком в браузере          */
+/* Главная функция: разбираем .sav                                    */
 /* ------------------------------------------------------------------ */
 
 export async function parseMewSave(
@@ -299,6 +477,8 @@ export async function parseMewSave(
 
   let catsRows: Array<{ key: number; data: Uint8Array }> = [];
   let pedigree: Uint8Array | null = null;
+  let houseState: Uint8Array | null = null;
+  let adventureState: Uint8Array | null = null;
 
   try {
     let stmt: ReturnType<Database["prepare"]> | null = null;
@@ -320,18 +500,26 @@ export async function parseMewSave(
       stmt?.free();
     }
 
-    try {
-      const pedStmt = db.prepare("SELECT data FROM files WHERE key = 'pedigree'");
+    const fileKeys = ["pedigree", "house_state", "adventure_state"];
+    for (const fk of fileKeys) {
       try {
-        if (pedStmt.step()) {
-          const d = pedStmt.get()[0];
-          if (d instanceof Uint8Array) pedigree = d;
+        const st = db.prepare("SELECT data FROM files WHERE key = ?");
+        try {
+          st.bind([fk]);
+          if (st.step()) {
+            const d = st.get()[0];
+            if (d instanceof Uint8Array) {
+              if (fk === "pedigree") pedigree = d;
+              else if (fk === "house_state") houseState = d;
+              else adventureState = d;
+            }
+          }
+        } finally {
+          st.free();
         }
-      } finally {
-        pedStmt.free();
+      } catch {
+
       }
-    } catch {
-      pedigree = null;
     }
   } finally {
     db.close();
@@ -340,17 +528,61 @@ export async function parseMewSave(
   // parse blobs
   interface BlobInfo {
     name: string;
-    gender: "M" | "F" | "?";
+    gender: "M" | "F" | "D" | "?";
     className: string | null;
+    dead: boolean;
+    retired: boolean;
+    donated: boolean;
+    flagsKnown: boolean;
   }
   const blobs = new Map<number, BlobInfo>();
+  let decompressFailures = 0;
   for (const row of catsRows) {
-    blobs.set(row.key, {
-      name: extractCatName(row.data),
-      gender: extractGender(row.data),
-      className: extractClass(row.data),
-    });
+    let info: BlobInfo;
+    try {
+      const { data: dec } = decompressCatBlob(row.data);
+      const meta = parseCatMeta(dec);
+      info = {
+        name: meta.name || `Кот #${row.key}`,
+        gender: meta.gender,
+        className: extractClass(dec),
+        dead: meta.dead,
+        retired: meta.retired,
+        donated: meta.donated,
+        flagsKnown: meta.flagsKnown,
+      };
+    } catch {
+      decompressFailures++;
+      info = {
+        name: extractCatName(row.data) || `Кот #${row.key}`,
+        gender: extractGenderFallback(row.data),
+        className: extractClass(row.data),
+        dead: false,
+        retired: false,
+        donated: false,
+        flagsKnown: false,
+      };
+    }
+    blobs.set(row.key, info);
   }
+  if (decompressFailures > 0) {
+    warnings.push(
+        `Не удалось распаковать ${decompressFailures} блоб(ов): статус для этих котов неизвестен.`
+    );
+  }
+
+  let houseRooms = new Map<number, string>();
+  if (houseState) {
+    houseRooms = parseHouseState(houseState);
+    if (houseRooms.size === 0) {
+      warnings.push(
+          "Не удалось разобрать house_state — отметки «в доме» могут быть неточными."
+      );
+    }
+  }
+  const adventureKeys = new Set<number>(
+      adventureState ? parseAdventureStateKeys(adventureState) : []
+  );
 
   // parse pedigree
   let pedRecords = new Map<number, { p1: number | null; p2: number | null; inb: number }>();
@@ -377,6 +609,16 @@ export async function parseMewSave(
     const blob = blobs.get(key);
     const rec = pedRecords.get(key);
     if (!blob && !rec) continue;
+    const dead = blob?.dead ?? false;
+    const inHouse = houseRooms.has(key);
+    const room = houseRooms.get(key) ?? null;
+    const onAdventure = adventureKeys.has(key);
+    let status: MewStatus;
+    if (dead) status = "dead";
+    else if (inHouse) status = "house";
+    else if (onAdventure) status = "adventure";
+    else if (blob) status = "gone";
+    else status = "unknown";
     cats.push({
       key,
       name: blob?.name || `Кот #${key}`,
@@ -385,6 +627,13 @@ export async function parseMewSave(
       hasBlob: !!blob,
       className: blob?.className ?? null,
       parents: rec ? [rec.p1, rec.p2] : [null, null],
+      alive: !dead && !!blob && blob.flagsKnown,
+      dead,
+      retired: blob?.retired ?? false,
+      donated: blob?.donated ?? false,
+      inHouse,
+      room,
+      status,
     });
   }
 

@@ -19,18 +19,13 @@ export const metadata: Metadata = {
     "Приложение для анализа файлов сохранений Mewgenics (.sav): просмотр всех котов, родителей и потомков выбранного кота, коэффициенты инбридинга.",
   keywords: ["Mewgenics", "родословная", "сохранение", "sav", "коты", "семейное дерево"],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "public/logo.svg",
   },
   openGraph: {
     title: "Mewgenics · Родословная",
     description: "Анализ .sav сохранений Mewgenics: коты, родители, потомки, инбридинг",
     siteName: "Mewgenics Pedigree",
     type: "website",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
   },
 };
 
