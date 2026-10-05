@@ -1,4 +1,4 @@
-**English** | [Русский](./README.ru.md)
+**English** | [Русский](README.ru.md)
 <div align="center">
 
 # 🐱 Mewgenics Breed Analyzer
