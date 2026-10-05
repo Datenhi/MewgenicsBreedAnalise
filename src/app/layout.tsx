@@ -19,7 +19,7 @@ export const metadata: Metadata = {
     "Приложение для анализа файлов сохранений Mewgenics (.sav): просмотр всех котов, родителей и потомков выбранного кота, коэффициенты инбридинга.",
   keywords: ["Mewgenics", "родословная", "сохранение", "sav", "коты", "семейное дерево"],
   icons: {
-    icon: "public/logo.svg",
+    icon: "/logo.svg",
   },
   openGraph: {
     title: "Mewgenics · Родословная",
