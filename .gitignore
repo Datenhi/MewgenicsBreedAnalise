@@ -83,6 +83,7 @@ yarn-error.log*
 # ---------------------------------------------------------------------------
 
 /skills/
+/mini-services/
 /examples/
 /tests/
 .claude/
@@ -100,3 +101,4 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+package-lock.json
