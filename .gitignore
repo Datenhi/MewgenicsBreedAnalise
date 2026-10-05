@@ -86,7 +86,6 @@ yarn-error.log*
 /examples/
 /tests/
 .claude/
-.z-ai-config/
 local-*
 test
 prompt
