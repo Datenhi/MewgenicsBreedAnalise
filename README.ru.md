@@ -60,7 +60,7 @@
 **Требования:** Node.js **20.9+** (требование Next.js 16), npm или bun; любой современный браузер с WebAssembly.
 
 ```bash
-git clone <url-репозитория>
+git clone https://github.com/Datenhi/MewgenicsBreedAnalise.git
 cd <папка-проекта>
 npm install        # или: bun install
 npm run dev        # или: npx next dev -p 3000
