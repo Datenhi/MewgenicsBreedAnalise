@@ -53,7 +53,7 @@
 ## 🚀 Быстрый старт
 
 **Перейдите по ссылке GitHubPackages**
-[GitHubPackages](https://datenhi.github.io/MewgenicsBreedAnalise/)
+[GitHubPages](https://datenhi.github.io/MewgenicsBreedAnalise/)
 
 **ИЛИ ЗАПУСТИТЕ ЛОКАЛЬНО**
 
