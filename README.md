@@ -53,7 +53,7 @@ on every branch.
 ## 🚀 Quick Start
 
 **Go to GitHubPackages**
-[GitHubPackages](https://datenhi.github.io/MewgenicsBreedAnalise/)
+[GitHubPages](https://datenhi.github.io/MewgenicsBreedAnalise/)
 
 **OR RUN LOCALLY**
 
