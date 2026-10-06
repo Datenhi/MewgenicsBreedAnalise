@@ -60,7 +60,7 @@ on every branch.
 **Requirements:** Node.js **20.9+** (required by Next.js 16), npm or bun; any modern browser with WebAssembly.
 
 ```bash
-git clone <url-вашего-repository>
+git clone https://github.com/Datenhi/MewgenicsBreedAnalise.git
 cd <project folder>
 npm install        # or: bun install
 npm run dev        # or: npx next dev -p 3000
