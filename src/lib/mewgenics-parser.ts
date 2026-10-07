@@ -15,12 +15,23 @@ export interface MewCat {
   inHouse: boolean;
   room: string | null;
   status: MewStatus;
+  stats: CatStats | null;
 }
 
 export interface MewSaveData {
   sourceName: string;
   cats: MewCat[];
   warnings: string[];
+}
+
+export interface CatStats {
+  strength: number;
+  dexterity: number;
+  constitution: number;
+  intelligence: number;
+  speed: number;
+  charisma: number;
+  luck: number;
 }
 
 import type { Database, SqlJsStatic } from "sql.js";
@@ -166,6 +177,7 @@ interface CatMeta {
   retired: boolean;
   donated: boolean;
   flagsKnown: boolean;
+  stats: CatStats | null;
 }
 
 function parseCatMeta(dec: Uint8Array): CatMeta {
@@ -217,7 +229,7 @@ function parseCatMeta(dec: Uint8Array): CatMeta {
   }
 
   if (!best) {
-    return { name: "", gender: "?", dead: false, retired: false, donated: false, flagsKnown: false };
+    return { name: "", gender: "?", dead: false, retired: false, donated: false, flagsKnown: false, stats: null };
   }
   const flags = best.flags;
   return {
@@ -227,7 +239,66 @@ function parseCatMeta(dec: Uint8Array): CatMeta {
     retired: flags != null ? !!(flags & 0x0002) : false,
     donated: flags != null ? !!(flags & 0x4000) : false,
     flagsKnown: flags != null,
+    stats: extractCatStats(dec),
   };
+}
+
+function indexOfAscii(hay: Uint8Array, needle: string, from: number): number {
+  const n = needle.length;
+  outer: for (let i = Math.max(0, from); i + n <= hay.length; i++) {
+    for (let j = 0; j < n; j++) {
+      if (hay[i + j] !== needle.charCodeAt(j)) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+const statScratch = new ArrayBuffer(8);
+const statScratchF64 = new Float64Array(statScratch);
+const statScratchB = new Uint8Array(statScratch);
+
+function readF64At(d: Uint8Array, off: number): number {
+  for (let i = 0; i < 8; i++) statScratchB[i] = d[off + i] ?? 0;
+  return statScratchF64[0];
+}
+
+function extractCatStats(dec: Uint8Array): CatStats | null {
+  let strEnd = indexOfAscii(dec, "female", 0x14);
+  if (strEnd >= 0) strEnd += 6;
+  else {
+    strEnd = indexOfAscii(dec, "male", 0x14);
+    if (strEnd < 0) return null;
+    strEnd += 4;
+  }
+  const maxL = Math.min(12, dec.length - strEnd - 8 - 28);
+  for (let digits = 0; digits <= maxL; digits++) {
+    const f64Off = strEnd + digits;
+    const mult = readF64At(dec, f64Off);
+    if (!Number.isFinite(mult) || mult < 0.1 || mult > 4) continue;
+    const base = f64Off + 8;
+    const vals: number[] = [];
+    let ok = true;
+    for (let i = 0; i < 7; i++) {
+      const v = readU32(dec, base + i * 4);
+      if (v > 255) {
+        ok = false;
+        break;
+      }
+      vals.push(v);
+    }
+    if (!ok) continue;
+    return {
+      strength: vals[0],
+      dexterity: vals[1],
+      constitution: vals[2],
+      intelligence: vals[3],
+      speed: vals[4],
+      charisma: vals[5],
+      luck: vals[6],
+    };
+  }
+  return null;
 }
 
 function parseHouseState(blob: Uint8Array): Map<number, string> {
@@ -534,6 +605,7 @@ export async function parseMewSave(
     retired: boolean;
     donated: boolean;
     flagsKnown: boolean;
+    stats: CatStats | null;
   }
   const blobs = new Map<number, BlobInfo>();
   let decompressFailures = 0;
@@ -550,6 +622,7 @@ export async function parseMewSave(
         retired: meta.retired,
         donated: meta.donated,
         flagsKnown: meta.flagsKnown,
+        stats: meta.stats,
       };
     } catch {
       decompressFailures++;
@@ -561,6 +634,7 @@ export async function parseMewSave(
         retired: false,
         donated: false,
         flagsKnown: false,
+        stats: null,
       };
     }
     blobs.set(row.key, info);
@@ -634,6 +708,7 @@ export async function parseMewSave(
       inHouse,
       room,
       status,
+      stats: blob?.stats ?? null,
     });
   }
 

@@ -14,7 +14,8 @@ import {
   InbreedingBadge,
   type TreeContext,
 } from "@/components/family-tree";
-import { parseMewSave, type MewSaveData, type MewCat, type MewStatus } from "@/lib/mewgenics-parser";
+import { parseMewSave, type MewSaveData, type MewCat, type MewStatus, type CatStats } from "@/lib/mewgenics-parser";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Cat as CatIcon,
   Upload,
@@ -29,10 +30,50 @@ import {
   Dna,
   Home as HomeIcon,
   RefreshCw,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 
 type ViewMode = "descendants" | "ancestors";
 type Filter = "alive" | "house" | "dead" | "all";
+
+type SortKey =
+    | "key"
+    | "name"
+    | "children"
+    | "descendants"
+    | "strength"
+    | "dexterity"
+    | "constitution"
+    | "intelligence"
+    | "speed"
+    | "charisma"
+    | "luck";
+type SortDir = "asc" | "desc";
+
+const SORT_OPTIONS: Array<[SortKey, string]> = [
+  ["key", "По номеру"],
+  ["name", "По алфавиту"],
+  ["children", "По количеству прямых детей"],
+  ["descendants", "По количеству потомков"],
+  ["strength", "По силе"],
+  ["dexterity", "По ловкости"],
+  ["constitution", "По телосложению"],
+  ["intelligence", "По интеллекту"],
+  ["speed", "По скорости"],
+  ["charisma", "По обаянию"],
+  ["luck", "По удаче"],
+];
+
+const STAT_TILES: Array<{ key: keyof CatStats; label: string; title: string }> = [
+  { key: "strength", label: "Сил", title: "Сила (Strength)" },
+  { key: "dexterity", label: "Лов", title: "Ловкость (Dexterity)" },
+  { key: "constitution", label: "Тел", title: "Телосложение (Constitution)" },
+  { key: "intelligence", label: "Инт", title: "Интеллект (Intelligence)" },
+  { key: "speed", label: "Скр", title: "Скорость (Speed)" },
+  { key: "charisma", label: "Оба", title: "Обаяние (Charisma)" },
+  { key: "luck", label: "Удч", title: "Удача (Luck)" },
+];
 
 export default function Home() {
   const [data, setData] = useState<MewSaveData | null>(null);
@@ -43,6 +84,8 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("alive");
   const [dragOver, setDragOver] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("key");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const applyData = useCallback((d: MewSaveData) => {
@@ -180,18 +223,66 @@ export default function Home() {
   const filteredCats = useMemo(() => {
     if (!data) return [];
     const q = search.trim().toLowerCase();
-    return data.cats.filter((c) => {
-      if (filter === "alive" && (c.dead || !c.hasBlob)) return false;
-      if (filter === "house" && (!c.inHouse || c.dead)) return false;
-      if (filter === "dead" && !c.dead) return false;
+    const filtered = data.cats.filter((c) => {
+      if (filter === "alive" && (c.dead || !c.hasBlob)) return false; // только живые (по умолчанию)
+      if (filter === "house" && (!c.inHouse || c.dead)) return false; // сейчас в доме
+      if (filter === "dead" && !c.dead) return false; // только мёртвые
       if (!q) return true;
       return (
-        c.name.toLowerCase().includes(q) || String(c.key) === q.replace("#", "")
+          c.name.toLowerCase().includes(q) || String(c.key) === q.replace("#", "")
       );
     });
-  }, [data, search, filter]);
+
+    const dir = sortDir === "asc" ? 1 : -1;
+    const statVal = (c: MewCat): number | null => {
+      if (!c.stats) return null;
+      switch (sortKey) {
+        case "strength": return c.stats.strength;
+        case "dexterity": return c.stats.dexterity;
+        case "constitution": return c.stats.constitution;
+        case "intelligence": return c.stats.intelligence;
+        case "speed": return c.stats.speed;
+        case "charisma": return c.stats.charisma;
+        case "luck": return c.stats.luck;
+        default: return null;
+      }
+    };
+    const byKey = (a: MewCat, b: MewCat) => a.key - b.key; // стабильный тай-брейк
+
+    return filtered.sort((a, b) => {
+      switch (sortKey) {
+        case "name":
+          return a.name.localeCompare(b.name, "ru") * dir || byKey(a, b);
+        case "children":
+          return (
+              ((childrenMap.get(a.key)?.length ?? 0) - (childrenMap.get(b.key)?.length ?? 0)) * dir ||
+              byKey(a, b)
+          );
+        case "descendants":
+          return (((descMemo.get(a.key) ?? 0) - (descMemo.get(b.key) ?? 0)) * dir) || byKey(a, b);
+        case "strength":
+        case "dexterity":
+        case "constitution":
+        case "intelligence":
+        case "speed":
+        case "charisma":
+        case "luck": {
+          const av = statVal(a);
+          const bv = statVal(b);
+          if (av == null && bv == null) return byKey(a, b);
+          if (av == null) return 1; // коты без статов — всегда в конце списка
+          if (bv == null) return -1;
+          return (av - bv) * dir || byKey(a, b);
+        }
+        default:
+          return byKey(a, b) * dir;
+      }
+    });
+  }, [data, search, filter, sortKey, sortDir, childrenMap, descMemo]);
 
   const selected: MewCat | null = selectedKey != null ? catMap.get(selectedKey) ?? null : null;
+
+  const selStats = selected?.stats ?? null;
 
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-amber-50/80 via-stone-50 to-stone-100">
@@ -316,7 +407,7 @@ export default function Home() {
               <StatCard icon={<Users className="h-5 w-5" />} label="Котов в родословной" value={stats.total} tone="amber" />
               <StatCard icon={<Heart className="h-5 w-5" />} label="Живых сейчас" value={stats.alive} tone="emerald" />
               <StatCard icon={<HomeIcon className="h-5 w-5" />} label="Из них в доме" value={stats.present} tone="sky" />
-              <StatCard icon={<Skull className="h-5 w-5" />} label="Мёртвых (кладбище)" value={stats.dead} tone="rose" />
+              <StatCard icon={<Skull className="h-5 w-5" />} label="Мёртвых (у Трупоеда)" value={stats.dead} tone="rose" />
             </div>
 
             <div className="grid flex-1 gap-4 lg:grid-cols-[340px_1fr]">
@@ -332,6 +423,29 @@ export default function Home() {
                         className="pl-8"
                       />
                     </div>
+                  </div>
+                  <div className="mb-2 flex items-center gap-1.5">
+                    <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
+                      <SelectTrigger className="h-8 flex-1 text-xs">
+                        <SelectValue placeholder="Сортировка" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SORT_OPTIONS.map(([k, label]) => (
+                            <SelectItem key={k} value={k} className="text-xs">
+                              {label}
+                            </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-9 shrink-0 px-0"
+                        title={sortDir === "asc" ? "По возрастанию" : "По убыванию"}
+                        onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+                    >
+                      {sortDir === "asc" ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
+                    </Button>
                   </div>
                   <div className="mb-2 flex gap-1.5">
                     {(
@@ -361,6 +475,11 @@ export default function Home() {
                         <li key={c.key}>
                           <button
                             onClick={() => setSelectedKey(c.key)}
+                            title={
+                              c.stats
+                                  ? `${c.name}: Сил ${c.stats.strength}, Лов ${c.stats.dexterity}, Тел ${c.stats.constitution}, Инт ${c.stats.intelligence}, Скр ${c.stats.speed}, Оба ${c.stats.charisma}, Удч ${c.stats.luck}`
+                                  : undefined
+                            }
                             className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
                               selectedKey === c.key
                                 ? "border-amber-400 bg-amber-100/80"
@@ -411,6 +530,21 @@ export default function Home() {
                           <StatusBadge status={selected.status} room={selected.room} retired={selected.retired} donated={selected.donated} />
                           <InbreedingBadge value={selected.inbreeding} />
                         </div>
+
+                        {selStats && (
+                            <div className="mt-3 grid grid-cols-7 gap-1.5">
+                              {STAT_TILES.map((t) => (
+                                  <div
+                                      key={t.key}
+                                      title={t.title}
+                                      className="rounded-lg border border-stone-200 bg-stone-50 px-1 py-1.5 text-center"
+                                  >
+                                    <div className="text-base font-bold leading-none text-stone-800">{selStats[t.key]}</div>
+                                    <div className="mt-1 text-[10px] font-medium uppercase tracking-wide text-stone-400">{t.label}</div>
+                                  </div>
+                              ))}
+                            </div>
+                        )}
 
                         <div className="mt-3 flex flex-wrap gap-x-8 gap-y-2 text-sm">
                           <div>
