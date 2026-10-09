@@ -16,6 +16,7 @@ export interface MewCat {
   room: string | null;
   status: MewStatus;
   stats: CatStats | null;
+  appearance: CatAppearance | null;
 }
 
 export interface MewSaveData {
@@ -53,13 +54,13 @@ declare global {
 function loadScriptOnce(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const existing = document.querySelector<HTMLScriptElement>(
-      `script[data-sqljs="${src}"]`
+        `script[data-sqljs="${src}"]`
     );
     if (existing) {
       if (existing.dataset.loaded === "1") return resolve();
       existing.addEventListener("load", () => resolve());
       existing.addEventListener("error", () =>
-        reject(new Error("Не удалось загрузить SQL-движок (sql.js)"))
+          reject(new Error("Не удалось загрузить SQL-движок (sql.js)"))
       );
       return;
     }
@@ -72,7 +73,7 @@ function loadScriptOnce(src: string): Promise<void> {
       resolve();
     });
     s.addEventListener("error", () =>
-      reject(new Error("Не удалось загрузить SQL-движок (sql.js)"))
+        reject(new Error("Не удалось загрузить SQL-движок (sql.js)"))
     );
     document.head.appendChild(s);
   });
@@ -420,6 +421,235 @@ function extractGenderFallback(d: Uint8Array): "M" | "F" | "?" {
   return "?";
 }
 
+
+export interface CatLegPart {
+  id: number;
+  pal: number;
+  claw: number;
+}
+
+
+export interface CatPartSlot {
+  shape: number;
+  tex: number;
+  mut: number;
+  claw: number;
+}
+
+export interface CatAppearance {
+  texture: number;
+  palette: number;
+  classPalette: number;
+  body: CatPartSlot;
+  head: CatPartSlot;
+  tail: CatPartSlot;
+  legL: CatPartSlot;
+  legR: CatPartSlot;
+  armL: CatPartSlot;
+  armR: CatPartSlot;
+  eyeL: CatPartSlot;
+  eyeR: CatPartSlot;
+  browL: CatPartSlot;
+  browR: CatPartSlot;
+  earL: CatPartSlot;
+  earR: CatPartSlot;
+  mouth: CatPartSlot;
+  legs: CatLegPart[];
+}
+
+const i32of = (v: number): number => (v >= 0x80000000 ? v - 0x100000000 : v);
+
+/** Точное чтение блока внешности по структуре блоба (как в kitty editor). */
+function extractAppearanceExact(dec: Uint8Array): CatAppearance | null {
+  try {
+    const dv = new DataView(dec.buffer, dec.byteOffset, dec.byteLength);
+    let pos = 0;
+    const u32 = (): number => {
+      const v = dv.getUint32(pos, true);
+      pos += 4;
+      return v;
+    };
+    const u64 = (): bigint => {
+      const v = dv.getBigUint64(pos, true);
+      pos += 8;
+      return v;
+    };
+    const skipStr = (): boolean => {
+      const n = u64();
+      if (n > 10000n) return false;
+      pos += Number(n);
+      return true;
+    };
+    u32(); // распакованный размер
+    u64(); // id
+    const nchars = u64();
+    if (nchars > 10000n) return null;
+    pos += Number(nchars) * 2; // utf16str имя
+    if (!skipStr()) return null;
+    pos += 16;
+    if (!skipStr()) return null;
+    pos += 4;
+    pos += 64; // 8 значений статов (f64/i64/f64…)
+    const v: number[] = [];
+    for (let i = 0; i < 72; i++) v.push(u32());
+    pos += 12; // 3 u32
+    // валидация: далее gender-строка (male…/female…/robotom/spidercat/…)
+    const glen = u64();
+    if (glen <= 0n || glen > 256n) return null;
+    const gbytes = dec.subarray(pos, pos + Number(glen));
+    // Структурная валидация: печатный ASCII. Конкретный префикс вида (male/female/
+    // robotom/spidercat) НЕ требуем — в новых версиях игры появляются новые виды,
+    // а жёсткий список давал appearance=null → силуэт-заглушку вместо спрайта.
+    let printable = true;
+    for (const b of gbytes) {
+      if (b < 32 || b > 126) {
+        printable = false;
+        break;
+      }
+    }
+    if (!printable) return null;
+    const gstr = new TextDecoder().decode(gbytes);
+    if (!/^(male|female|robotom|spidercat)/.test(gstr)) {
+      console.warn(
+          `[mewgenics] кот нового вида "${gstr}" — внешность разобрана без проверки префикса`,
+      );
+    }
+
+    const slot = (off: number): CatPartSlot => ({
+      shape: i32of(v[off]),
+      tex: i32of(v[off + 1]),
+      mut: i32of(v[off + 2]),
+      claw: i32of(v[off + 3]),
+    });
+    const app: CatAppearance = {
+      texture: i32of(v[0]),
+      palette: i32of(v[1]),
+      classPalette: i32of(v[2]),
+      body: slot(3),
+      head: slot(8),
+      tail: slot(13),
+      legL: slot(18),
+      legR: slot(23),
+      armL: slot(28),
+      armR: slot(33),
+      eyeL: slot(38),
+      eyeR: slot(43),
+      browL: slot(48),
+      browR: slot(53),
+      earL: slot(58),
+      earR: slot(63),
+      mouth: { shape: i32of(v[68]), tex: i32of(v[69]), mut: i32of(v[70]), claw: 0 },
+      legs: [],
+    };
+    app.legs = [app.legL, app.legR, app.armL, app.armR].map((s) => ({
+      id: s.shape,
+      pal: 0,
+      claw: s.claw,
+    }));
+    // sanity: палитра/текстура в разумных пределах, детали не отрицательные
+    if (app.palette < 0 || app.palette > 255) return null;
+    for (const s of [app.body, app.head, app.tail, app.legL, app.legR, app.armL, app.armR, app.eyeL, app.eyeR, app.browL, app.browR, app.earL, app.earR, app.mouth]) {
+      if (s.shape < 0 || s.shape > 5000) return null;
+    }
+    return app;
+  } catch {
+    return null;
+  }
+}
+
+/** Резервная эвристика (старый обратный проход от gender-якоря) — на случай
+ * смены шапки блоба в будущих версиях игры. */
+function extractAppearanceLegacy(dec: Uint8Array): CatAppearance | null {
+  let strStart = indexOfAscii(dec, "female", 0x14);
+  if (strStart < 0) strStart = indexOfAscii(dec, "male", 0x14);
+  if (strStart < 0) return null;
+
+  const readU = (off: number): number | null => {
+    if (off < 0 || off + 4 > dec.length) return null;
+    const v = (
+        dec[off] | (dec[off + 1] << 8) | (dec[off + 2] << 16) | (dec[off + 3] << 24)
+    ) >>> 0;
+    return i32of(v);
+  };
+
+  const recs: Array<[number, number, number, number]> = [];
+  let end = strStart;
+  while (end - 20 >= 0) {
+    if (readU(end - 20) !== 0) break;
+    recs.unshift([
+      readU(end - 16)!,
+      readU(end - 12)!,
+      readU(end - 8)!,
+      readU(end - 4)!,
+    ]);
+    end -= 20;
+    if (recs.length > 24) break;
+  }
+  if (recs.length < 12) return null;
+
+  let p = end - 4;
+  let zeros = 0;
+  while (p >= 0 && readU(p) === 0 && zeros < 8) {
+    p -= 4;
+    zeros++;
+  }
+  if (p - 16 < 0) return null;
+  const palA = readU(p - 16)!;
+  const headId = readU(p - 12)!;
+  const mouthId = readU(p - 8)!;
+  const basePal = readU(p)! || palA;
+
+  const rec = (i: number): [number, number, number, number] => recs[i] ?? [0, 0, 0, 0];
+  const r0 = rec(0);
+  const r12 = rec(12);
+  const pair = (i: number): [number, number] => [rec(i)[0], rec(i + 1)[0]];
+  const ears = pair(6);
+  const eyes = pair(8);
+  const brows = pair(10);
+  const mk = (shape: number): CatPartSlot => ({ shape, tex: 0, mut: 0, claw: 0 });
+  const legsOld = [2, 3, 4, 5].map((i) => rec(i));
+
+  const app: CatAppearance = {
+    texture: rec(1)[0],
+    palette: basePal,
+    classPalette: -1,
+    body: mk(r0[0]),
+    head: mk(headId),
+    tail: mk(r12[0]),
+    legL: { shape: legsOld[0][0], tex: 0, mut: 0, claw: legsOld[0][3] },
+    legR: { shape: legsOld[1][0], tex: 0, mut: 0, claw: legsOld[1][3] },
+    armL: { shape: legsOld[2][0], tex: 0, mut: 0, claw: legsOld[2][3] },
+    armR: { shape: legsOld[3][0], tex: 0, mut: 0, claw: legsOld[3][3] },
+    eyeL: mk(eyes[0]),
+    eyeR: mk(eyes[1]),
+    browL: mk(brows[0]),
+    browR: mk(brows[1]),
+    earL: mk(ears[0]),
+    earR: mk(ears[1]),
+    mouth: mk(mouthId),
+    legs: [],
+  };
+  app.legs = [app.legL, app.legR, app.armL, app.armR].map((s) => ({
+    id: s.shape,
+    pal: 0,
+    claw: s.claw,
+  }));
+  return app;
+}
+
+function extractCatAppearance(dec: Uint8Array): CatAppearance | null {
+  const app = extractAppearanceExact(dec) ?? extractAppearanceLegacy(dec);
+  if (!app) {
+    // диагностика: найти gender-якорь, чтобы понять, блоб ли это вообще
+    const anchor =
+        indexOfAscii(dec, "female", 0x14) >= 0 || indexOfAscii(dec, "male", 0x14) >= 0
+            ? "gender-якорь найден, но разбор не сошёлся (возможно, изменился формат блоба)"
+            : "gender-якорь не найден";
+    console.warn(`[mewgenics] внешность кота не разобрана: ${anchor}`);
+  }
+  return app;
+}
+
 function extractClass(d: Uint8Array): string | null {
   const bytes = d;
   let best: { cls: string; pos: number } | null = null;
@@ -455,10 +685,10 @@ function tryParsePedigree(vals: bigint[], start: number, count: number): Pedigre
 
   while (i + 3 < vals.length && records.size < count) {
     if (
-      vals[i] === MARKER &&
-      i + 1 < vals.length &&
-      vals[i + 1] >= 1n &&
-      vals[i + 1] <= 100000n
+        vals[i] === MARKER &&
+        i + 1 < vals.length &&
+        vals[i + 1] >= 1n &&
+        vals[i + 1] <= 100000n
     )
       break;
     const a = vals[i];
@@ -493,7 +723,6 @@ function parsePedigreeBlob(data: Uint8Array): {
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   for (let i = 0; i < n; i++) vals[i] = dv.getBigInt64(i * 8, true);
 
-  // candidate section starts: int64 == -11 (marker) followed by plausible count
   const candidates: Array<{ start: number; count: number }> = [];
   for (let i = 0; i + 1 < n; i++) {
     if (vals[i] === MARKER && vals[i + 1] >= 1n && vals[i + 1] <= 100000n) {
@@ -506,9 +735,9 @@ function parsePedigreeBlob(data: Uint8Array): {
     const res = tryParsePedigree(vals, cand.start, cand.count);
     // prefer parses that reached the declared count
     const better =
-      !best ||
-      res.score > best.score ||
-      (res.score === best.score && res.records.size === cand.count);
+        !best ||
+        res.score > best.score ||
+        (res.score === best.score && res.records.size === cand.count);
     if (better) {
       best = res;
       declaredCount = cand.count;
@@ -523,8 +752,8 @@ function parsePedigreeBlob(data: Uint8Array): {
 /* ------------------------------------------------------------------ */
 
 export async function parseMewSave(
-  dbBytes: Uint8Array,
-  sourceName: string
+    dbBytes: Uint8Array,
+    sourceName: string
 ): Promise<MewSaveData> {
   const warnings: string[] = [];
 
@@ -532,7 +761,7 @@ export async function parseMewSave(
   const header = new TextDecoder("latin1").decode(dbBytes.subarray(0, 16));
   if (!header.startsWith("SQLite format 3")) {
     throw new Error(
-      "Это не похоже на сохранение Mewgenics: файл должен быть базой данных SQLite (.sav)."
+        "Это не похоже на сохранение Mewgenics: файл должен быть базой данных SQLite (.sav)."
     );
   }
 
@@ -542,7 +771,7 @@ export async function parseMewSave(
     db = new SQL.Database(dbBytes);
   } catch {
     throw new Error(
-      "Не удалось открыть файл как базу данных SQLite. Файл повреждён или это не .sav сохранение."
+        "Не удалось открыть файл как базу данных SQLite. Файл повреждён или это не .sav сохранение."
     );
   }
 
@@ -565,7 +794,7 @@ export async function parseMewSave(
       }
     } catch {
       throw new Error(
-        "В файле нет таблицы cats — это не сохранение Mewgenics. Нужен файл steamcampaign*.sav из папки сохранений игры."
+          "В файле нет таблицы cats — это не сохранение Mewgenics. Нужен файл steamcampaign*.sav из папки сохранений игры."
       );
     } finally {
       stmt?.free();
@@ -589,14 +818,12 @@ export async function parseMewSave(
           st.free();
         }
       } catch {
-
       }
     }
   } finally {
     db.close();
   }
 
-  // parse blobs
   interface BlobInfo {
     name: string;
     gender: "M" | "F" | "D" | "?";
@@ -606,6 +833,7 @@ export async function parseMewSave(
     donated: boolean;
     flagsKnown: boolean;
     stats: CatStats | null;
+    appearance: CatAppearance | null;
   }
   const blobs = new Map<number, BlobInfo>();
   let decompressFailures = 0;
@@ -623,9 +851,11 @@ export async function parseMewSave(
         donated: meta.donated,
         flagsKnown: meta.flagsKnown,
         stats: meta.stats,
+        appearance: extractCatAppearance(dec),
       };
     } catch {
       decompressFailures++;
+      // фолбэк: старая эвристика по несжатым литералам LZ4
       info = {
         name: extractCatName(row.data) || `Кот #${row.key}`,
         gender: extractGenderFallback(row.data),
@@ -635,6 +865,7 @@ export async function parseMewSave(
         donated: false,
         flagsKnown: false,
         stats: null,
+        appearance: null,
       };
     }
     blobs.set(row.key, info);
@@ -672,7 +903,7 @@ export async function parseMewSave(
   // sanity check
   if (declared > 0 && pedRecords.size < declared * 0.9) {
     warnings.push(
-      `Прочитано записей родословной: ${pedRecords.size} из ${declared}. Формат файла может отличаться.`
+        `Прочитано записей родословной: ${pedRecords.size} из ${declared}. Формат файла может отличаться.`
     );
   }
 
@@ -683,6 +914,7 @@ export async function parseMewSave(
     const blob = blobs.get(key);
     const rec = pedRecords.get(key);
     if (!blob && !rec) continue;
+
     const dead = blob?.dead ?? false;
     const inHouse = houseRooms.has(key);
     const room = houseRooms.get(key) ?? null;
@@ -693,6 +925,7 @@ export async function parseMewSave(
     else if (onAdventure) status = "adventure";
     else if (blob) status = "gone";
     else status = "unknown";
+
     cats.push({
       key,
       name: blob?.name || `Кот #${key}`,
@@ -709,14 +942,16 @@ export async function parseMewSave(
       room,
       status,
       stats: blob?.stats ?? null,
+      appearance: blob?.appearance ?? null,
     });
   }
 
   if (cats.length === 0) {
     throw new Error(
-      "В файле не найдено котов. Убедитесь, что это сохранение Mewgenics (steamcampaign*.sav)."
+        "В файле не найдено котов. Убедитесь, что это сохранение Mewgenics (steamcampaign*.sav)."
     );
   }
 
   return { sourceName, cats, warnings };
 }
+
